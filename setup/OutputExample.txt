@@ -1,0 +1,77 @@
+> #load packages#
+> library(rjags)
+> library(coda)
+> 
+> #load datafile for test analyses#
+> load(file="DataJane.Rdata")
+> 
+> ###Run some code to test if packages and JAGS are working as they should###
+> set.seed(1)
+> 
+> dat_Jane <- data.frame(mydata_Jane$scale)
+> dat_Jane <- as.matrix(dat_Jane)
+> colnames(dat_Jane) <- c("mood")
+> 
+> ins = list(list(phi=.6, Ivar=100, mu=50),
++            list(phi=.3, Ivar=60, mu=60),
++            list(phi=-.2, Ivar=80, mu=70))
+> nt=length(dat_Jane)
+> 
+> jags_AR1 <- jags.model('AR1model.txt',
++                        data = list('nt' = nt, 
++                                    'y' = as.numeric(dat_Jane)),
++                        inits = ins,
++                        n.chains = 3) 
+Compiling model graph
+   Resolving undeclared variables
+   Allocating nodes
+Graph information:
+   Observed stochastic nodes: 75
+   Unobserved stochastic nodes: 18
+   Total graph size: 183
+
+Initializing model
+
+  |++++++++++++++++++++++++++++++++++++++++++++++++++| 100%
+> update(jags_AR1, 2000) 
+  |**************************************************| 100%
+> samps_AR1 <- coda.samples(model = jags_AR1, 
++                           variable.names = c('phi','mu','Ivar'),
++                           n.iter = 2000) 
+  |**************************************************| 100%
+> 
+> gelman.diag(samps_AR1)
+Potential scale reduction factors:
+
+     Point est. Upper C.I.
+Ivar       1.01       1.02
+mu         1.00       1.01
+phi        1.00       1.00
+
+Multivariate psrf
+
+1.01
+> summary(samps_AR1) 
+
+Iterations = 3001:5000
+Thinning interval = 1 
+Number of chains = 3 
+Sample size per chain = 2000 
+
+1. Empirical mean and standard deviation for each variable,
+   plus standard error of the mean:
+
+          Mean      SD Naive SE Time-series SE
+Ivar 169.43337 28.5635 0.368754       0.617853
+mu    75.34820  1.6526 0.021335       0.025480
+phi    0.08175  0.1244 0.001605       0.002594
+
+2. Quantiles for each variable:
+
+         2.5%        25%       50%      75%    97.5%
+Ivar 121.5073 148.851919 166.47197 187.0965 233.4030
+mu    72.0358  74.255354  75.35590  76.4760  78.5514
+phi   -0.1649  -0.002433   0.08282   0.1647   0.3255
+
+> 
+> ####
