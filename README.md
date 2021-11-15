@@ -12,8 +12,8 @@ The workshop will primarily use the `R` programming language, for which we recom
 
 There are three main folders in the repository
 - `setup` contains materials which participants should engage with **before** the start of the lab, relating to installing and checking relevant software packages
-- `Day 1: Discrete-Time Modeling` 
-- `Day 2: Continuous-Time Modeling`
+- `Day 1 (Discrete-Time Modeling)` 
+- `Day 2 (Continuous-Time Modeling)`
 
 You can follow the lab parts of the sessions by opening the `.html` file in each subfolder 
 
