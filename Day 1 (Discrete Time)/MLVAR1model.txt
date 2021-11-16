@@ -1,0 +1,69 @@
+####JAGS model specification for a bivariate multilevel autoregressive lag 1 model ###
+
+model{
+  
+  ###model for timepoint 2 onward for each person######
+  
+  for (j in 1:np)
+  { 
+   for (t in (startseries[j]+1):endseries[j])
+    {
+      y[t,1:2]~dmnorm(evy[t,1:2],Ipre[1:2,1:2]) ###the data is multivariate normal distributed
+      evy[t,1]<-b[j,1] + b[j,3]*cy[t-1,2] + b[j,5]*cy[t-1,1] ###regression equation for the predicted value for timepoint t, person j, for variable 1.
+      evy[t,2]<-b[j,2] + b[j,6]*cy[t-1,2] + b[j,4]*cy[t-1,1] ###regression equation for the predicted value for timepoint t, person j, for variable 2.
+      cy[t,1]<- y[t,1] - b[j,1]   ###Here we are centering the variables inside the model. This cy is the model-centered score for timepoint t, person j, variable 1, b[j,1] is the mean for variable 1.
+      cy[t,2]<- y[t,2] - b[j,2]   ###This cy is the model-centered score for timepoint t, person j, variable 2  b[j,2] is the mean for variable 2.
+      
+    }
+  }
+  
+  
+  ####Model specification for time point 1###
+  ####You can specify the model for timepoint 1 in various ways, this is one option. As long as you have long time series for each person, the method should not have an impact.###
+ 
+ for (j in 1:np)
+  { 
+    cy[startseries[j],1]<- y[startseries[j],1] - b[j,1]  ###timepoint 1
+    cy[startseries[j],2]<- y[startseries[j],2] - b[j,2]  ###timepoint 1
+  }   	 
+  
+  
+  ####priors###########
+  ###for the 2x2 covariance matrix of the innovations, we can avoid the Wishart prior distribution, instead using uniform priors on the variances and correlation###     
+  
+  Ipre[1:2,1:2]<- inverse(Ivar[1:2,1:2]) ###Ipre is the precision matrix for the innovations
+  Ivar[1,1] ~dunif(0,10)  ###Prior for the variance of the innovations of variable 1
+  Ivar[2,2] ~dunif(0,10)  ###Prior for the variance of the innovations of variable 2
+  Ivar[1,2] <- Icor*sqrt(Ivar[1,1])*sqrt(Ivar[2,2])  ###the equation for the covariance between the innovations of the two variables given the correlation
+  Icor ~ dunif(-1,1) ###Prior for the correlation between the innovations of variable 1 and 2.
+  Ivar[2,1] <- Ivar[1,2]
+  
+  
+  ###prior for random parameters###
+  for (j in 1:np)
+  {
+    b[j,1:6]~dmnorm(bmu[1:6],bpre[1:6,1:6]) ## Each person's means and regression coefficients come from the same multivariate normal distribution.
+  }
+  
+  ####priors for the fixed effects###
+  bmu[1]~dnorm(0,.000000001)  # Prior for the average mean for variable 1
+  bmu[2]~dnorm(0,.000000001)   # Prior for the average mean for variable 2
+  bmu[3]~dnorm(0,.000000001)   # Prior for the average crosslagged effect of variable 2 on variable 1
+  bmu[4]~dnorm(0,.000000001) # Prior for the average crosslagged effect of variable 1 on variable 2
+  bmu[5]~dnorm(0,.000000001) #  # Prior for the average autoregressive effect for variable 1
+  bmu[6]~dnorm(0,.000000001) #  # Prior for the average autoregressive effect for variable 2
+  
+  ###priors for the precision matrix (the inverse of the covariance matrix) of the random effects, and calculate the covariance matrix and correlations
+  ###
+  bpre[1:6,1:6]~dwish(W[,],df) ###the scale matrix W is calculated in R and then fed to winbugs/JAGS.
+  df<- 6
+  bcov[1:6,1:6] <- inverse(bpre[1:6,1:6])  ###Calculate the covariance matrix from the estimated precision matrix
+  
+  
+  for (d in 1:6)
+  {
+    for (g in 1:6){
+      bcor[d,g] <- bcov[d,g] / ( sqrt(bcov[d,d]) * sqrt(bcov[g,g]) ) ###Calculate the correlation matrix from the estimated covariance matrix, because this may be easier to interpret than a covariance matrix.
+    }
+  }
+} 

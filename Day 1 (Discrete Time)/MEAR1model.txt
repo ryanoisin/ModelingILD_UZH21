@@ -1,0 +1,31 @@
+
+model{
+   
+
+#####model######
+	for (t in 2:nt)  ###model for timepoint 2 onwards
+	{
+		y[t]~dnorm(muy[t],Epre)  ###Epre is measurement precision
+		muy[t]<- mu + ytilde[t]  ##mu is mean
+		ytilde[t] ~ dnorm(muytilde[t], Ipre) ### Ipre is innovation precision
+		muytilde[t] <- phi*ytilde[t-1]		 ##phi is autoregression coefficient
+		
+    }
+
+####timepoint 1#######
+
+	ytilde[1] <- y[1]-mu
+    		
+####priors###########
+       
+    Epre <- inverse(Evar) ##Measurement error precision
+	Evar ~dunif(0,300)   ## measurement error variance
+	Ipre <- inverse(Ivar) ## innovation precision
+    Ivar ~dunif(0,300) ##innovation variance
+	
+	phi~dunif(-1,1) ##autoregression coefficient
+	mu~dnorm(50,.001) ##mean
+		
+		      
+
+}

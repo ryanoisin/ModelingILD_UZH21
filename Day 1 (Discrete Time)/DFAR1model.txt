@@ -1,0 +1,73 @@
+
+model{
+   
+
+#####model######
+	for (t in 2:nt) ###model for timepoint 2 onwards
+	{
+		y[t,1]~dnorm(muy[t,1],Ipre[1])  ###Ipre is innovation precision
+		muy[t,1]<- mu[1] + l[1]*f[t]
+		y[t,2]~dnorm(muy[t,2],Ipre[2])  ###Ipre is innovation precision
+		muy[t,2]<- mu[2] + l[2]*f[t]
+		y[t,3]~dnorm(muy[t,3],Ipre[3])  ###Ipre is innovation precision
+		muy[t,3]<- mu[3] + l[3]*f[t]
+		y[t,4]~dnorm(muy[t,4],Ipre[4])  ###Ipre is innovation precision
+		muy[t,4]<- mu[4] + l[4]*f[t]
+		y[t,5]~dnorm(muy[t,5],Ipre[5])  ###Ipre is innovation precision
+		muy[t,5]<- mu[5] + l[5]*f[t]
+		y[t,6]~dnorm(muy[t,6],Ipre[6])  ###Ipre is innovation precision
+		muy[t,6]<- mu[6] + l[6]*f[t]
+		y[t,7]~dnorm(muy[t,7],Ipre[7])  ###Ipre is innovation precision
+		muy[t,7]<- mu[7] + l[7]*f[t]
+		y[t,8]~dnorm(muy[t,8],Ipre[8])  ###Ipre is innovation precision
+		muy[t,8]<- mu[8] + l[8]*f[t]
+
+		f[t]~dnorm(muf[t],Fpre)
+		muf[t]<- phi*f[t-1]
+		
+		
+    }
+
+   
+	#####priors###########
+    f[1]~dnorm(0,1)
+  	Fpre[1] <- inverse(Ivar[1]) ## innovation precision
+    Fvar[1] ~dunif(0,50)   ##innovation variance
+    Ipre[1] <- inverse(Ivar[1]) ## innovation precision
+    Ivar[1] ~dunif(0,50)   ##innovation variance
+	Ipre[2] <- inverse(Ivar[2]) ## innovation precision
+    Ivar[2] ~dunif(0,50)   ##innovation variance
+	Ipre[3] <- inverse(Ivar[3]) ## innovation precision
+    Ivar[3] ~dunif(0,50)   ##innovation variance
+	Ipre[4] <- inverse(Ivar[4]) ## innovation precision
+    Ivar[4] ~dunif(0,50)   ##innovation variance
+	Ipre[5] <- inverse(Ivar[5]) ## innovation precision
+    Ivar[5] ~dunif(0,50)   ##innovation variance
+	Ipre[6] <- inverse(Ivar[6]) ## innovation precision
+    Ivar[6] ~dunif(0,50)   ##innovation variance
+	Ipre[7] <- inverse(Ivar[7]) ## innovation precision
+    Ivar[7] ~dunif(0,50)   ##innovation variance
+	Ipre[8] <- inverse(Ivar[8]) ## innovation precision
+    Ivar[8] ~dunif(0,50)   ##innovation variance
+
+
+    phi~dunif(-1,1) ##autoregression coefficient
+	mu[1]~dnorm(0,.001) ##mean
+	mu[2]~dnorm(0,.001) ##mean
+	mu[3]~dnorm(0,.001) ##mean
+	mu[4]~dnorm(0,.001) ##mean
+	mu[5]~dnorm(0,.001) ##mean
+	mu[6]~dnorm(0,.001) ##mean
+	mu[7]~dnorm(0,.001) ##mean
+	mu[8]~dnorm(0,.001) ##mean
+	l[1]<-1
+	l[2]~dnorm(0,.001) ##loading
+	l[3]~dnorm(0,.001) ##loading
+	l[4]~dnorm(0,.001)	##loading
+	l[5]~dnorm(0,.001) ##loading
+	l[6]~dnorm(0,.001) ##loading
+	l[7]~dnorm(0,.001) ##loading
+	l[8]~dnorm(0,.001) ##loading
+		      
+
+}
