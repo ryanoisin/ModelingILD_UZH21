@@ -1,0 +1,726 @@
+---
+title: "Modeling ILD - Continuous Time Models"
+author: "Oisín Ryan"
+date: "November 2021"
+params:
+  answers: true
+mainfont: Arial
+fontsize: 12pt
+urlcolor: blue
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float: true
+    df_print: paged
+    theme: paper
+  pdf_document:
+    toc: true
+    toc_depth: 5
+    latex_engine: xelatex
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H', warning = FALSE, message = FALSE)
+```
+
+
+In this practical, you will get practice with fitting single-subject continuous-time models to data. We'll focus on the continuous-time VAR(1) (also known as the ornstein uhlenbeck model, or more generally as a first order stochastic differential equation). To fit these models we'll be using the `ctsem` R package, specifically the Bayesian estimation procedure implemented in that package through the `stan` software package. 
+
+To help us along with certain exercises, we will also make use of the `ctnet` package, which consists of helper functions to allow researchers in network analysis of `ctsem` models. You'll need to install the latter directly from github using `devtools::install_github("ryanoisin/ctnet")`,  Please see the `setup` folder for more instructions on installing necessary packages
+
+```{r, warnings = F, message = F}
+library(ctsem)
+library(ctnet)
+```
+
+In **Exercise 1** we will fit a univariate continuous-time model to the `Jane` data from the previous part of the lab. Here you will get to grips with the basics of getting your data into the format needed for `ctsem`, as well as specifying and fitting basic models.
+
+In **Exercise 2** we will see how simple CT models can be extended to the multivariate setting, using a simulated dataset. We will cover the issue of obtaining CIs when the interest is in transformations (such as the matrix exponential) of your estimated parameters. We will show ways of visualizing and understanding multivariate models.
+
+In **Exercise 3** we will show the parameter estimates from *Exercise 2* can be interpreted from a network perspective. This will cover functions for calculating total, direct and indirect effects, as well as calculating centrality metrics and using your model to explore the effects of hypothetical interventions.
+
+In **Exercise 4** we'll briefly walk you through how to specify multi-level models in ctsem. In this exercise we ask you to try out your newfound skills on new datasets. We'll provide you with another empirical single-subject dataset to work with, but feel free to try out `ctsem` on either your own data, or the datasets provided in the DT part yesterday.
+
+I recommend going through Exercise 1 (though the bonus exercises can be skipped), and at least briefly looking through Exercise 2. At that point you may prefer to work through exercise 3, or skip to exercise 4, or start working on your own data.
+
+
+For your reference, the [`ctsem` documentation](https://cran.r-project.org/web/packages/ctsem/ctsem.pdf) and [vignettes](https://cran.r-project.org/web/packages/ctsem/vignettes/hierarchicalmanual.pdf) detail more general model specifications and details than provided here. Exercises 2 through 4 are based on Ryan \& Hamaker (2021) Time to intervene: A continuous-time approach to network analyis and centrality, *Psychometrika*, available open access [here](https://link.springer.com/article/10.1007/s11336-021-09767-0). The `ctnet` package implements many of the developments in Ryan \& Hamaker (2021) and its functionality is described [here](https://github.com/ryanoisin/ctnet)
+
+
+# Ex.1: The AR(1) model in Continuous-Time
+
+## Loading and Exploring Data
+
+In this first exercise we will fit a CT-AR(1) model to Jane's data from the earlier lab. As we did before, let's read in the data and select our variable of interest.
+
+```{r}
+data_Jane <- readRDS("data_Jane.RDS")
+mydata_Jane <- data_Jane$scale
+```
+
+In the previous lab we made use of only the mood measurements. However, this dataset also contains information about how the measurements are spaced in time. Specifically, we have both a date and a time of observation column.
+
+```{r}
+data_Jane[1:11,c("date", "time")]
+```
+
+We can see that the observations are somewhat erratically spaced. Generally, the data follows a "daily diary'' pattern, but there are a number of observations spaced much more closely in time than we would expect (e.g. pairs of observations within a day). To explore how measurements are spaced in time, let's transform our date and time columns, which are currently strings or character variables, into a time-format variable. My preferred method for this is to create a `POSIXct` type object from the  raw date and time information. All we need to do is paste the strings together and tell the `as.POSIXct` function what format the timing information is in. We can do this as follows:
+
+```{r}
+data_Jane$date_time <- as.POSIXct(paste(data_Jane$date,data_Jane$time), format = "%m/%d/%y %H:%M")
+head(data_Jane$date_time)
+```
+
+This allows us to easily manipulate the timing information. For instance, we can calculate the *difference* in time between each consecutive measurement very easily. First, let's remove all of the rows in our dataset that contain only missing information. In this dataset, all rows which have missing date-time information also have missing information on the mood variable of interest
+
+```{r}
+all(is.na(data_Jane$scale) == is.na(data_Jane$date_time))
+# this is true, so we can just remove missing rows - no information contained there
+data_Jane <- data_Jane[!is.na(data_Jane$date_time),]
+```
+
+With this tidying up done, we're ready to check out how each consecutive measurement is spaced in time. We make use of the `difftime` function, which allows us to calculate the difference, that is, the time elapsed between two `POSIXct` date-time objects. We also need to supply a unit of time - in this case we will use `hours`. This is calculated and saved in an object, then visualized in the histogram below. 
+
+```{r}
+# create storage
+cti <- rep(0,length(data_Jane$date_time)-1)
+# loop through every observation and calculate time since the last observation
+for(i in 2:length(data_Jane$date_time)){
+  cti[i-1] <- difftime(data_Jane$date_time[i], data_Jane$date_time[i-1])
+}
+
+# visualize
+hist(cti, main = "Time-Interval (hrs) Between Measurements", xlab = "hours")
+
+```
+
+As we can see there's a pretty bi-modal distribution to how measurements are spaced. We have a large cluster of closely spaced observations in the $0 - 5$ hours range, and then a cluster of observations spaced approximately a day (i.e. $15 - 25$ hours) apart. This time-interval information is ignored in the DT analysis, but explicitly modelled in a CT approach. This suggests to me that the current dataset may be a good candidate for a CT analysis.
+
+## Preparing Data for ctsem
+
+There are a couple of data processing steps which we need to take before fitting a CT model to data using `ctsem`. First, we need to change the format of the time-interval information. Specifically, `ctsem` wants time-interval information in the format of *time elapsed since the first measurement occassion*. This is slightly different to what we have plotted in the histogram above, which was time elapsed between each *consecutive* measurement occassion. However, we can calculate this very easily, again using our `difftime` function.
+
+Here, however, we should not the importance of picking a *unit* of time for our analysis, such as seconds, minutes, hours, days or weeks. This choice can have an effect on how we interpret our results, and a general rule of thumb is to pick a unit of time such that 1 unit of time is a) roughly the time-interval of primary interest, and b) is typical of the consecutive spacing between measurements in the dataset. Here we can make a choice of either hours or days, since we have many measurements on an hourly rate, but we intended to primarily measure individuals on a day-to-day basis. Let's choose days for now.
+
+```{r}
+TI <- difftime(data_Jane$date_time, data_Jane$date_time[1], units = "days")
+head(TI)
+```
+
+As a second step, we can standardize our variables of interest. This mostly helps in interpreting the parameter estimates, and if we choose to use bayesian estimation, it's good to know that the default priors are chosen to be ``reasonable'' for models with standardized variables (see ctsem documentation for details).
+
+```{r}
+Y1 <- data_Jane$scale
+Y1 <- scale(Y1)
+```
+
+Finally, we need to supply `ctsem` with an `ID` column, even in the case of single-subject data. Putting these three variables together in a data frame gives us the dataset we need to feed `ctsem`
+
+```{r}
+ID = rep(1,length(Y1))
+TI = as.numeric(TI) # change from the date-time format to numeric
+mydata_Jane <- data.frame(ID = ID, TI = TI, Y1 = Y1)
+head(mydata_Jane)
+```
+
+## CT-AR(1) Model overview
+
+Now that we have our data set up, let's take a look at the model we want to fit. From the lecture re-call that we are interested in a first-order differential equation
+
+$$
+\frac{dY(t)}{dt} = \alpha + A Y(t) + G\frac{dW(t)}{dt}
+$$
+
+where the first-derivative, i.e. the *rate of change* of our variable at a point in time $t$, denoted $\frac{dY(t)}{dt}$, is dependent on the *value* or position of that variable at that point in time, $Y(t)$. This dependency is encoded in the *drift* parameter $A$. Notice a few extra terms in this model in comparison to the one in the lecture slides. We have here a so-called continuous-time intercept $\alpha$, which can be used to model trends and non-zero equilibrium positions, as well as a *diffusion*  term $G$,  which can be used to specify the variance of the error (Wiener process). To keep things simple, we'll assume there are no trends, and since we have centered the variables earlier, we can set $\alpha = 0$. So the parameters we are interested in estimating are the *drift* $A$ and the error-variance-like *diffusion* term $G$. We'll see how this is done in `ctsem` below.
+
+Recall that we can represent this same model in *integral form*  as the CT-VAR(1) model, written
+
+$$
+Y(t_{\tau})= e^{A \Delta t_\tau} (Y(t_{\tau-1}) - \mu) + \epsilon(\Delta t_{\tau})
+$$
+
+Again, to be precise, we have some small changes in notation to reflect that the CT-AR(1) model is a statistical model, which will be estimated from observations taken at measurement occasions $\tau$ at certain points in time $t$. The term $(Y(t_{\tau-1}) - \mu)$ on the right-hand side denotes that the variables have been centered around their mean, i.e. equilibrium value $\mu$. The lagged relationship between observed values of $Y$ spaced some time-interval $\Delta t$ apart, are given by the matrix exponential of the drift matrix multiplied by the time-interval $e^{A \Delta t}$. The residuals $\epsilon(\Delta t_{\tau})$ change over time, and their variance is a function of the time-interval $\Delta t$, as well as the *diffusion* matrix and the *drift* matrix described above. 
+
+## Specifying the CT-AR(1) model in ctsem
+
+Now we have to specify the above CT-AR(1) model in ctsem. To do this, it's helpful to keep in mind that `ctsem` can be used to fit far more general models than the ones we will consider in the current practical. Specifically, `ctsem` is based on SEM or state-space model specification, and so allows for the specification of a *measurement model* as well as a dynamical model, allowing multiple observed variables to be mapped to a single latent variable, and dynamics to be modelled on the latent level. In our case, we have no such measurement model, and so we will need to specify that the measurement parts of the model should be ignored. Because it's based on SEM, `ctsem` models must be specified using a series of *model matrices*.
+
+Let's specify the model matrices we need for ctsem. We start off by specifying the parts of the model relating to the *measurement model*. Essentially, all we are doing here is specifying that no measurement model should be estimated, and so that the observed variables should be treated as identical to the latent variables
+```{r}
+nvar <- 1
+# First, we specify a matrix of factor loadings as an identity matrix (latent = observed measurements)
+ LAMBDA = diag(nrow = nvar)
+# Then we specify that the intercepts and errors of the measurement model should be set to zero
+ MANIFESTMEANS = matrix(data=0, nrow=nvar, ncol=1)
+ MANIFESTVAR = matrix(data=0, nrow=nvar, ncol=nvar)
+ # Even though there is no interesting measurement model, We have to give names to the latent variables
+ latentNames = paste0("eta", 1:nvar)
+```
+
+With that out of the way, let's move on to specifying the more substantively interesting parts of the model. First, we specify that we do not want to model any trends, by setting the $\alpha$ vector to 0's. 
+
+```{r}
+CINT = matrix(data=0, nrow=nvar, ncol=1) # 0 intercepts in the DE equation
+```
+
+Second, we specify that we want to freely estimate the *drift* parameter $A$ and the *diffusion parameter* $G$ (essentially - freely estimate the innovation variance). We can do this very simply using
+
+```{r}
+ DRIFT = "auto" # estimate full drift matrix
+ DIFFUSION = "auto" # full residual matrix
+```
+
+The last model argument we have to specify relates to the presence of "trait-variables"  that is, time-invariant variables that, in a multilevel model, could be used to explain individual differences. We have no multilevel structure here, so we simply set
+
+```{r}
+MANIFESTTRAITVAR = NULL
+```
+
+With these model matrices and arguments in place, we can specify our model using `ctmodel()`. This argument mostly takes the matrices and objects defined above, with a few extra components. 
+
+```{r}
+
+model_ar1 <- ctModel( manifestNames = paste0("Y",1:nvar), # give the observed variables as named in the dataset
+                     n.manifest = nvar, # number of manifest variables
+                     n.latent= nvar, # same number of latent variables (map directly)
+                     Tpoints = nrow(data), # number of observed time points
+                     type = "stanct", # fit the model using stan (recommended)
+                     id = "ID", # name of the ID column in your dataset
+                     time = "TI", # name of the time-information column in your dataset
+                     # Now specify the model matrices as above
+                     latentNames = latentNames,
+                     LAMBDA = diag(nrow = nvar), # measurement model (identity)
+                     MANIFESTMEANS = matrix(data=0, nrow=nvar, ncol=1),
+                     MANIFESTVAR = matrix(data=0, nrow=nvar, ncol=nvar),
+                     CINT = matrix(data=0, nrow=nvar, ncol=1), # 0 intercepts
+                     DRIFT = "auto", # estimate full drift matrix
+                     DIFFUSION = "auto", # full residual matrix
+                     MANIFESTTRAITVAR = NULL # no manifest trait variables
+)
+
+```
+
+
+Note that in the background, `ctsem` is also specifying and estimating a couple of parameters who's meaning is not immediately obvious based on the model specification given above. These are `T0means` and `T0var` representing the mean and variance of observations at the first time-point, respectively. These parameters are not so meaningful in our case, but they are present because they allow for more general model specifications than we are concerned with here. We can think about these parameters as being useful when we are looking at "growth-curve" type systems: Systems where we observe individuals that start very far away from their equilibrium and only gradually approach this over time. We are interested in a situation where individuals are varying around their equilibrium for the whole observation window. So, we know that they are there, and we will freely estimate them, but they're not primarily of any concern.
+
+It's helpful to have a little bit of a closer look at the details of the model object we just specified before fitting it. We can do this by examing the `pars` part of the model object
+
+```{r}
+model_ar1$pars
+```
+
+This shows us a table of the different parameters in the model. the `param` column tells us the name of different parameters, with `<NA>` denoting that it is not freely estimated. For those parameters that are fixed to constants, the `value` column tells us what value they are fixed to. We can ignore the `transform` column for now, and focus on the column marked `indvarying`. This column tells us which parameters are allowed to vary across individuals. This column is important if you have multiple subjects in your dataset, or if you would like to use ctsem to fit a multilevel model: This is essentially how you specify random effects in a `ctsem` model. By default, any intercept-related parameters, in this case `T0means`, is allowed to vary across individuals.  Of course, it doesn't make sense for a single-subject model to have parameters that vary across individuals. It's no problem to leave the model like this, since this argument will simply be ignored, but let's exercise good practice and set this parameter to be fixed across individuals
+
+```{r}
+model_ar1$pars[1,"indvarying"] = FALSE
+```
+
+
+## Fitting the model
+Now that we have specified the model we want to fit in a `ctModel` object, we are ready to estimate those parameters! We do this simply by feeding that dataset and the model object to the fitting function of `ctsem`. We will use `ctStanFit()` to fit the model, which calls the `rstan` package in the background. Note that we can choose here to use either Bayesian estimation `optimize = FALSE` or maximum likelihood `optimize = FALSE`. The latter will take longer to run but is more stable. We choose to use Bayesian estimation here. 
+
+Because we're using Bayesian estimation, we again need to choose priors, select how many chains we want to run, and how many iterations we want to run those chains for. For the priors, we'll use the defaults in ctsem, which can be viewed using
+
+```{r}
+ctsem:::plot.ctStanModel(model_ar1)
+```
+Here we see a prior for each of the free parameters in our model. The priors are specified to be generally uninformative: The priors for the variance terms, `diff_eta1` and `T0var_eta1` are chosen such that we get positive variance terms, while the prior for `drift_eta1` is chosen to be negative, reflecting a stable process. For more details on prior specification, see the `ctsem` documentation.
+
+Let's now fit the model, using the other default ctsem options of 2 chains and 1000 iterations.
+
+```{r, eval = T, cache = T}
+# Set optimize = TRUE for frequentist estimation and optimize = FALSE for Bayesian estimation
+# Generally, optimize = FALSE is recommended
+fit <- ctStanFit(datalong = mydata_Jane, ctstanmodel = model_ar1, optimize = FALSE,
+                 iter = 1000, chains = 2)
+
+```
+
+## Checking the model fit
+
+As we do whenever we fit a bayesian model, let's start by checking out some diagnostics. Let's have a look at the trace plots and densities. Depending on what version of `ctsem` you're using, you can do this in different ways. By default however, we will always see the trace plots for both the freely estimated parameters and the parameters that are fixed to constants, so we can ignore the latter.
+
+```{r, message = F, warnings = F}
+# you can use
+# plot(fit)
+# to get everything at once, or the below lines of code to get first the trace plots, 
+ctsem:::plot.ctStanFit(fit, type = "trace", wait = FALSE)
+# then the densities
+# ctsem:::plot.ctStanFit(fit, type = "density", wait = FALSE)
+# if you're using an older version of ctsem, you might need to run the rstan function directly
+rstan::stan_dens(fit$stanfit$stanfit)
+```
+
+We see some good signs for model convergence - the trace plots look as we would expect them to, and the densities are nicely uni-modal. We can also take a look at the `rhat` statistic (the gelman-rubin diagnositic). We can get this by first creating a summary of the fit object
+
+```{r}
+sfit <- summary(fit)
+sfit$logposterior[,"Rhat"]
+
+# or we can visualize the Rhat across iterations using rstan functionality 
+# rstan:::stan_rhat(fit$stanfit$stanfit)
+```
+Again, looks good, so let's move on to interpreting the model fit.
+
+
+## Interpreting the model
+
+There are a few different approaches we can take to interpreting the parameter estimates. First, we can look directly at the point estimates and CIs of the CT model. Here we'll focus on the interpretation of the *drift* parameter $A$. We can extract these from the fit object using `summary()`
+
+```{r}
+sfit <- summary(fit)
+sfit$parmatrices
+```
+
+Here we can see that the estimated drift parameter is negative and relatively large, indicating that deviations are pulled back to equilibrium relatively quickly. We take the *mean* column as our point estimate (i.e., the posterior mean) and the 2.5 and 97.5 percentiles of the posterior as our CI.
+
+```{r}
+driftrow <- sfit$parmatrices[sfit$parmatrices[,"matrix"] == "DRIFT",c("Mean","2.5%","97.5%")]
+driftrow
+```
+
+Recall that the CT model explicitly models how DT *autoregressive*  parameters vary as a function of the time-interval between measurements. This gives us another way to interpret the estimated *drift* parameter - we can use $e^{(A \Delta t)}$ to see how the model expects the carry-over from measurement to measurement to differ depending on the time-interval. For example, this drift parameter implies that the carry-over strength from day-to-day is
+
+```{r}
+driftest <- driftrow$Mean
+daypars <- c(exp(driftest),exp(driftrow$`2.5%`),exp(driftrow$`97.5%`))
+names(daypars) <- c("Estimate", "Lower","Upper")
+daypars
+
+
+```
+
+As we can see, the model-implied auto-regressive parameter for the day-to-day interval is very small. However, the model also implies that the carry-over from hour-to-hour is much larger
+
+```{r}
+# we want to know the effects for an hour
+TI <- (1/24) # an hour is one 24th of a day
+# Multiply drift by TI
+hourpars <- c(exp(driftest* TI),exp(driftrow$`2.5%` * TI),exp(driftrow$`97.5%` * TI))
+names(hourpars) <- c("Estimate", "Lower","Upper")
+hourpars
+
+```
+
+In fact, we can visualize how the auto-regressive parameter is expected to change over a whole range of time-intervals by repeatedly calculating $e^{(A \Delta t)}$ for different values of $\Delta t$. This is shown below, with the green and grey lines representing the hour and day lagged effects respectively. Notice that the shape of this function is very similar to an impulse response function, but it's plotting a *parameter*  rather than the trajectory of a *variable*.
+
+```{r}
+TI <- seq(0,2,.01)
+est <- exp(driftest*TI)
+lower <- exp(driftrow$`2.5%` * TI)
+upper <- exp(driftrow$`97.5%` * TI)
+
+
+# create plot
+plot.new()
+plot.window(xlim = c(0,2), ylim = c(0,1))
+axis(1); axis(2)
+title("Estimate Lagged Parameter across Time-Intervals", xlab = "Time-Interval (days)", ylab = "Coefficient")
+lines(x = TI, y = est, col = "red")
+lines(x = TI, y = lower, col = "red", lty = 2)
+lines(x = TI, y = upper, col = "red", lty = 2)
+
+# Add reference lines
+abline( v = 1, col = "grey")
+abline( h = exp(driftest), col = "grey")
+abline( v = (1/24), col = "green")
+abline( h = exp(driftest*(1/24)), col = "green")
+```
+
+Can you come up with any other ways to interpret the model results in substantive terms? Note that, for a simple CT-AR(1) model like this, the ``shape'' of how the lagged parameter changes according to the time-interval will always be some form of exponential decay. So a simple univariate model like this can't capture, say, a second *peak* at very long intervals. Much like the DT case, for complex dynamics like that we need either *higher-order* terms, or, more variables in our model. So, the interpretation of plots as shown above should always be done in consideration of a) the possibility of model misspecification, and b) the time-intervals we have in the dataset. 
+
+## Bonus Exercise I
+
+Compare your results to those obtained from the regular discrete-time AR(1) analysis of Jane's data. What do you notice? You can see how the CT and DT models are "equivalent" by re-running the CT analysis but ignoring the time-interval information. For instance, you can fit a CT model ignoring the time-interval information, by acting as though the observations are equally spaced. Do this by overwriting the `TI` column as follows, which now reads as though all measurements are equally spaced with 1 unit of time.
+
+```{r, eval = F}
+mydata_Jane$TI <- seq(0,nrow(mydata_Jane), 1)
+```
+
+Try fitting the same model on this new altered dataset, and derive the model-implied dynamics at a time-interval of one day. Re-create the plot given above. What do you notice about the parameter estimates? What do you notice about the CIs? Can you think of any issues with using a CT model like this for daily diary data?
+
+## Bonus Exercise II
+
+Re-run the model in the main exercise, but choose a different unit of time. For example, choose hours instead of days. You would do this by re-running the following lines and re-fitting the model
+
+```{r}
+TI <- difftime(data_Jane$date_time, data_Jane$date_time[1], units = "hours")
+
+mydata_Jane <- data.frame(ID = ID, TI = as.numeric(TI), Y1 = Y1)
+```
+
+
+What do you notice?
+
+
+# Ex. 2: Multivariate Models and CT-Networks
+
+In this exercise we will try out the use of multivariate CT models. To aid us in this, we'll use a simulated dataset, included in the `ctnet` package
+
+```{r loaddata}
+library(ctnet)
+data <- as.data.frame(simdata)
+head(data)
+
+```
+
+The dataset consists of observations of four variables Y1, Y2, Y3 and Y4. The fourth column, `time` encodes the time-interval information, in terms of time since the first measurement occasion (the format needed for ctsem). Because this a simulated example, the unit of time is arbitrary, but we will interpret it as `hours`. 
+
+Since we are typically interested in using the CT model to understand how lagged effects vary as a function of the time-interval, it's helpful to check the distribution of time-intervals we have at hand in the current dataset. To visualize this it's helpful to transform the time column into *time between consecutive measurement occassions*. This is done and plotted below
+
+```{r tihist}
+TI <- rep(NA,nrow(data)-1)
+for(i in 2:nrow(data)){
+  TI[i - 1] <- data$time[i] - data$time[i-1]
+}
+
+hist(TI, xlab = "Time intervals",
+     main = "Histogram of Time Intervals present in dataset", breaks =20)
+abline(v = mean(TI), col = "red", lwd = 2)
+```
+
+We see that the time-interval (i.e. the time between subsequent measurement occassions) is pretty uniformly distributed between $0.1$ and $2.0$. This information is important to keep in mind: using the CT model to infer dynamics at shorter or longer time-intervals than we have in the dataset is a form of model extrapolation, and so should be approached with caution.
+
+## Processing the data
+
+For this exercise, we already have the time-interval information in the desired format in `data$time`, that is, *time since the first observation in the dataset*. Again we standardize the variables involved.
+
+```{r}
+data[, paste0("Y",1:4)] <- apply(data[, paste0("Y",1:4)], 2, scale)
+
+```
+
+
+## The CT-VAR(1) model
+The model we want to fit to this data is the $p$-variate generalization of the model in the previous exercise.
+
+$$
+\frac{d\boldsymbol{Y}(t)}{dt} = \boldsymbol{\alpha} + \boldsymbol{A} \times \boldsymbol{Y}(t) + \boldsymbol{G}\frac{dW(t)}{dt}
+$$
+where the first-derivative, i.e. the *rate of change* of our $p$ variables of interest at a point in time $t$, denoted $\frac{d\boldsymbol{Y}(t)}{dt}$, are dependent on the *value* or position of those variables at that point in time, $\boldsymbol{Y}(t)$. The relationships between processes are defined by the $p\times p$ *drift matrix*, denoted $\boldsymbol{A}$. Just as in a DT-VAR(1) model, we have *auto-effects* on the diagonal and *cross-effects* (relationships between processes) on the off-diagonal. We have a $p$ vector of intercepts $\boldsymbol{\alpha}$, which can be used to model trends, and a *diffusion matrix* $\boldsymbol{G}$ which can be used to specify the variance-covariance matrix of the error (Wiener process). We will again assume there are no trends, $\alpha = 0$, but we will allow the residuals of the model to be correlated.
+
+We can represent this same model in *integral form*  as the CT-VAR(1) model, written
+
+$$
+\boldsymbol{Y}(t_{\tau})= \boldsymbol{e}^{\boldsymbol{A} \Delta t_\tau} (\boldsymbol{Y}(t_{\tau-1}) - \mu) + \boldsymbol{\epsilon}(\Delta t_{\tau})
+$$
+which again corresponds to a multivariate version of the model in the previous excercise.
+
+## Specifying the CT-VAR(1) model in ctsem
+
+As we did in the univariate case, it's necessary to specify a measurement model and a dynamic model. We start off by specifying the parts of the model relating to the measurement model. Essentially, all we are doing here is specifying that no measurement model should be estimated, so that the observed variables should be treated as identical to the latent variables
+
+```{r}
+nvar <- 4
+# First, we specify a matrix of factor loadings as an identity matrix
+ LAMBDA = diag(nrow = nvar)
+# Then we specify that the intercepts and errors of the measurement model should be set to zero
+ MANIFESTMEANS = matrix(data=0, nrow=nvar, ncol=1)
+ MANIFESTVAR = matrix(data=0, nrow=nvar, ncol=nvar)
+ # Even though there is no interesting measurement model, We have to give names to the latent variables
+ latentNames = paste0("eta",1:nvar)
+```
+ 
+
+Since we have centered data, we specify that we do not want to model any trends by setting the $\boldsymbol{\alpha}$ vector to 0's, and we omit any time-invariant trait terms 
+
+```{r}
+CINT = matrix(data=0, nrow=nvar, ncol=1) # 0 intercepts in the DE equation
+MANIFESTTRAITVAR = NULL
+```
+
+
+Last, we specify that we want to freely estimate all elements of the *drift matrix* $\boldsymbol{A}$ and the *diffusion matrix* $\boldsymbol{G}$, that is, the matrix which determines the residual variances and covariances. We can do this very simply using
+
+```{r}
+ DRIFT = "auto" # estimate full drift matrix
+ DIFFUSION = "auto" # full residual matrix
+```
+
+With these model matrices and arguments in place, we can specify our model using `ctmodel()`. This argument mostly takes the matrices and objects defined above, with a few extra components. Notice that, by specifying `nvar` the model code is essentially unchanged from above
+
+```{r}
+
+model2 <- ctModel(manifestNames = paste0("Y",1:nvar), # give the observed variables as named in the dataset
+                     n.manifest = nvar, # number of manifest variables
+                     n.latent= nvar, # same number of latent variables (map directly)
+                     Tpoints = nrow(data), # number of observed time points
+                     type = "stanct", # fit the model using stan (recommended)
+                     id = "id", # name of the ID column in your dataset
+                     time = "time", # name of the time-information column in your dataset
+                     # Now specify the model matrices as above
+                     latentNames = latentNames,
+                     LAMBDA = diag(nrow = nvar), # measurement model (identity)
+                     MANIFESTMEANS = matrix(data=0, nrow=nvar, ncol=1),
+                     MANIFESTVAR = matrix(data=0, nrow=nvar, ncol=nvar),
+                     CINT = matrix(data=0, nrow=nvar, ncol=1), # 0 intercepts
+                     DRIFT = "auto", # estimate full drift matrix
+                     DIFFUSION = "auto", # full residual matrix
+                     MANIFESTTRAITVAR = NULL # no manifest trait variables
+)
+
+```
+
+## Fitting the model
+Now that we have specifed the model we want to fit in a `ctModel` object, we are ready to estimate those parameters! We do this simply by feeding that dataset and the model object to the fitting function of `ctsem`.
+
+Note that, fitting such a large model on such a large dataset with these techniques can take quite some time (hours). So, instead of fitting the model during the practical, let's just load the fit object we have supplied to you
+
+```{r, eval = F}
+# Set optimize = TRUE for frequentist estimation and optimize = FALSE for Bayesian estimation
+# Generally, optimize = FALSE is recommended
+ simfit <- ctStanFit(datalong = data, ctstanmodel = model2, optimize = FALSE)
+# saveRDS(simfit, simfit.RDS)
+```
+
+
+```{r}
+load("simfit_out.rda")
+ctsem_results <- summary(simfit)
+# You can also obtain the parameter matrices directly using
+# ctsem::ctStanContinuousPars(simfit)
+
+```
+
+## Checking convergence
+
+We can check the convergence of the model in just the same way as we did in the earlier exercise. I'll skip this step here, because we are working with simulated data, and I know that the model has succeeded in estimating the true parameters with a high degree of precision!
+
+## Interpeting the Model I
+
+Just as we did in the first exercise, we can interpret the drift matrix parameters directly, by inspecting the point estimates and CIs.
+
+```{r}
+driftdf <- ctsem_results$parmatrices[ctsem_results$parmatrices == "DRIFT",]
+driftdf
+```
+
+
+For ease of interpretation we can plot the estimated drift matrix parameters as a network (for details Ryan \& Hamaker, 2021). 
+
+```{r}
+drift_est <- matrix(ctsem_results$parmatrices[ctsem_results$parmatrices$matrix == "DRIFT","Mean"],
+       4,4,byrow = T)
+library(qgraph)
+qgraph(t(drift_est), fade = F,edge.labels = TRUE, theme = "colorblind", layout = "circle",
+       mar=(rep(6,4)))
+```
+
+In the previous exercise we have seen that the negative auto-effects ($A_{11}, A_{22}$ etc.) can be interpreted in terms of the strength of the equilibrium-reverting force applied by a variable to itself. That means that more strongly negative auto-effects (such as $A_{4,4} = -6.69$ vs the weaker $A_{2,2} = -2.91$) reflect variables that have less carry-over, i.e., they return to baseline quicker, all else being equal. The cross-effects depicted in the network, that is, the off-diagonal elements of $A$, can be interpreted the very same as 
+cross-lagged effects defined over a truly moment-to-moment time-interval. So, for instance $A_{4,2} = -7.9$ means that the current value of $Y2$ has a strong negative effect on the value that $Y4$ takes on a moment later in time, and vice versa for the strong positive cross-effects.
+
+As is standard in many settings, we may choose to omit from the network structure those parameters whose CIs contain zero. This leads to a more sparse network structure shown below
+
+```{r}
+driftdf$Meansig <- NA
+for(i in 1:nrow(driftdf)){
+  driftdf$Meansig[i] <- ifelse(sign(driftdf[i,"2.5%"]) == sign(driftdf[i,"97.5%"]), driftdf$Mean[i], 0)
+}
+
+drift_sig <- matrix(driftdf$Meansig,
+                    4,4,byrow = T)
+
+qgraph(t(drift_sig), fade = F,edge.labels = TRUE, theme = "colorblind", layout = "circle",
+       mar=(rep(6,4)))
+```
+
+## Interpeting the Model II
+
+Of course, to aid in our interpretation of the model, we can derive the model-implied lagged effects at different intervals. We can do this by taking the *matrix exponential* of the drift matrix multiplied by some time-intervals of interest. Note that the *matrix exponential* is not equivalent to taking the scalar exponential of all matrix elements. Instead, we need to use the special `expm` package for matrix exponentials. So, for example, the model-implied lagged effects at time-intervals of a half-hour and one hour would be, respectively
+
+```{r, message = FALSE, warning=FALSE}
+library(expm)
+expm::expm(drift_est*.5)
+expm::expm(drift_est*1)
+```
+
+Or in network form
+
+```{r}
+qgraph(t(expm::expm(drift_est*.5)), fade = F,edge.labels = TRUE, theme = "colorblind", layout = "circle", title = "Half-hour DT network",
+       mar=(rep(6,4)))
+qgraph(t(expm::expm(drift_est*1)), fade = F,edge.labels = TRUE, theme = "colorblind", layout = "circle", title = "One-hour DT network",
+       mar=(rep(6,4)))
+
+```
+
+From the figure it's clear that the DT network structure can be very different at different time-intervals. We can get a complete picture of this by deriving the model-implied lagged effects across a range of values of $\Delta t$. But of course, we don't just want point estimates - we want *credible intervals*  around those point estimates.
+
+Obtaining CIs for these types of matrix transformations is a little bit more involved than the univariate case. The first step is to obtain a number of samples of the drift matrix $A$ from the posterior of our model object.
+
+```{r, cache =TRUE}
+post <- ctsem::ctExtract(simfit)
+post_drift <- post$pop_DRIFT
+```
+
+The `post_drift` object now contains $1000$ posterior samples of the $4 \times 4$ drift matrix. Alternatively if the model was fit using maximum likelihood, $1000$ samples from the likelihood of the model are obtained. Once we have obtained this, if we want CIs around the matrix function $e^{(A \Delta t)}$, we need to apply that function to every sample from our posterior, and then take the relevant quantiles. We have simplified this process for you in the `ctnet` package. The easiest way to do this is to run the `plotPhi()` function with argument `plot = FALSE`, supplying the posterior samples and the sequence of values for $\Delta t$ to be evaluated, and save this to an object. Behind the scenes, this function is calling `getCI()` which can be used to obtain CIs for any function of the posterior drift matrices. Note that this can take a moment to run, so we've supplied you with the `phidt_CI` object in `simfit_out.rda` (so if you loaded this as above, it's already in your local environment)
+
+```{r, eval = F}
+dts <- seq(0,2,.01)
+
+phidt_CI <- plotPhi(posterior = post_drift, dts = dts, plot = FALSE )
+
+phidt_CI <- sapply(dts,function(dt){
+  getCIs(post_drift,simplify=TRUE, FUN=expm::expm, const = dt)
+}, simplify = "array")
+
+```
+
+Now we can simply plot the expected lagged parameters as a function of the time-interval using `plotPhi()` with argument `plot = TRUE`. Let's plot the auto-regressive parameters seperately from the cross-lagged parameters for clarity
+
+```{r}
+dts <- seq(0,2,.01)
+ plotPhi(CI_obj = phidt_CI, dts = dts,  index = "AR", leg = TRUE)
+ plotPhi(CI_obj = phidt_CI, dts = dts,  index = "CL", colvec = NULL, leg = TRUE)
+```
+
+To get a closer look, we can plot individual parameters
+
+```{r}
+ plotPhi(CI_obj = phidt_CI, dts = dts,  index = matrix(c(1,2),1,2), colvec = NULL, leg = TRUE)
+```
+We can see, for instance, that according to the model, the lagged relationship from $Y2$ to $Y1$ is positive at very short lags, strongly negative at somewhat longer lags, and weakly negative again around $\Delta t = 1hr$.
+
+Recall that these kinds of discrete-time lagged parameters should be interpreted as *total effects*  rather than the moment-to-moment *direct effects* described by the drift matrix $A$. In this case, this complex pattern can be read off the CT network plotted above. $Y2$ has a weak positive direct effect on $Y1$, but is also connected to $Y1$ via a stronger negative indirect effect, through $Y4$, as well as a positive indirect effect $Y1 \rightarrow Y3 \rightarrow Y4 \rightarrow Y2$. This is why the total effect is initially positive, then negative, then positive again at longer intervals.
+
+What other interesting patterns of lagged parameters do you find here? Can you explain these based on the drift matrix? 
+
+# Ex. 3: Path analysis and Centrality in CT models
+
+In the previous exercise you got a flavour of how CT models effect how we think about network structure. The key insight is that parameters of DT models are both time-interval dependent, and should be characterised as total effects rather direct effects. This naturally has implications for the use of *centrality measures*, whose interpretation rests on the (possibly erroneous) notion that DT parameters represent direct effects. 
+
+The drift matrix gives a natural alternative method of defining network structure, in terms of direct moment-to-moment dependencies in the differential equation model, as we saw above. Ryan \& Hamaker (2021) describe in more detail how total, direct and indirect effects can be calculated in a CT framework, and develop new centrality measures for use with CT models. Here we briefly showcase the functions in `ctnet` which allow for these parameter calculations
+
+## Path-Specific Effects
+
+To illustrate the calculation of path-specific effects from a CT model, we use the model estimated above. Let's take it we are interested in disentangling the lagged relationship between from $Y2$ to $Y1$ into it's component total, direct and indirect component, across a range of time-intervals. For a single time-interval, we can simply use the `TE()`, `DE()` and `IE()` functions supplied in `ctnet`. For the latter, we need to specify which mediators we consider - so, for `DE()` which mediators are held constant, and for `IE()` which mediators we wish to count paths through
+
+```{r}
+ctnet::TE(drift_est,dt = .5,IV = 2, DV = 1)
+ctnet::DE(drift_est,dt = .5,IV = 2, DV = 1, M = c(3,4))
+ctnet::IE(drift_est,dt = .5,IV = 2, DV = 1, M = c(3,4))
+```
+As we can see, $TE = DE + IE$. At a time-interval of half an hour, the total effect of $Y2$ on $Y1$ is made up of a strong negative indirect effect, and a weaker positive direct effect, adding up to a moderate negative total effect.
+
+As we did above, we can derive these parameters for a range of time-intervals, and obtain CIs around those model-implied parameters. We do this using the generic function `getCIs`, passing the path-tracing function through `FUN` and supplying any additional arguments for those functions. This may take a moment to run
+
+```{r, cache  = TRUE}
+dts <- seq(0,1,.01)
+TE_CI <- sapply(dts,function(dt){
+  getCIs(post_drift,simplify=TRUE, FUN=ctnet::TE, const = 1, dt = dt, IV = 2, DV = 1)
+}, simplify = "array")
+DE_CI <- sapply(dts,function(dt){
+  getCIs(post_drift,simplify=TRUE, FUN=ctnet::DE, const = 1, dt = dt, IV = 2, DV = 1, M = c(3,4))
+}, simplify = "array")
+IE_CI <- sapply(dts,function(dt){
+  getCIs(post_drift,simplify=TRUE, FUN=ctnet::IE, const = 1, dt = dt, IV = 2, DV = 1, M = c(3,4))
+}, simplify = "array")
+```
+
+We can plot this manually as follows:
+
+```{r}
+plot.new()
+plot.window(xlim = c(0,1), ylim = c(-1,1))
+axis(1); axis(2)
+abline(h = 0)
+title("Path-Specific Effects across Time-Intervals", xlab = "Time-Interval", ylab = "Coefficient")
+lines(dts, TE_CI[2,], col = "purple", lty = 1)
+lines(dts, TE_CI[1,], col = "purple", lty = 2); lines(dts, TE_CI[3,], col = "purple", lty = 2)
+lines(dts, DE_CI[2,], col = "orange", lty = 1)
+lines(dts, DE_CI[1,], col = "orange", lty = 2); lines(dts, DE_CI[3,], col = "orange", lty = 2)
+lines(dts, IE_CI[2,], col = "darkgreen", lty = 1)
+lines(dts, IE_CI[1,], col = "darkgreen", lty = 2); lines(dts, IE_CI[3,], col = "darkgreen", lty = 2)
+legend("topright", legend  = c("Total","Direct","Indirect"), lty = 1, col = c("purple", "orange", "darkgreen"))
+
+```
+
+## Centrality Measures
+
+Ryan \& Hamaker (2021) define centrality metrics based on the notion of hypothetical *pulse* and *press* interventions. **Total Effect Centrality** summarizes the effect on the rest of the network of a short-lived hypothetical *pulse* intervention to the target variable. **Indirect Effect Centrality** on the other hand, summarizes the effect of a long lived *press* intervention to the target variable. 
+
+These centrality metrics are again functions of the drift matrix and the time-interval under consideration, allowing us to understand the model-implied time-course of these interventions. For example, we can obtain the point estimates of the centrality metrics at a particular time interval, say $\Delta t = 1$ using the `ctCentrality()` function
+
+```{r}
+ctCentrality(drift = drift_est, dt = 1)
+```
+
+This function returns the total and indirect effect centrality for each variable at that time-interval. Alternatively, if we want point estimates *and* CIs we need to supply the `post_drift` object created above to the `posterior` argument.
+
+```{r, cache = T}
+ctCentrality(drift = drift_est, dt = 1, posterior = post_drift)
+```
+which returns the lower, median, and upper bound of the centrality estimates. 
+
+Again, we can simply apply the `ctCentrality()` function over a range of values for the time-interval in order to visualize the evolution of these effects over time. This can be done using `apply` or equivalently, by calling calling the `plotCentrality()` function with argument `plot = FALSE`. Since this takes a while to calculate, we supply you with `centrality_CI` in the `simfit_out.rda` object.
+
+```{r, eval = FALSE}
+dts = seq(0,2,.01)
+centrality_CI <- sapply(dts,function(dt){
+  ctCentrality(drift_est,dt,listout=F, posterior = post_drift)
+}, simplify = "array")
+
+centrality_CI <- plotCentrality(posterior = post_drift, dts = seq(0,2,.01),plot = FALSE)
+
+```
+
+
+With this obtained, we can now visualize the estimated centrality measures, and their CIs, across time-intervals. We can do this manually, or, using the `plotCentrality` function. Below we do this for the Total Effect centrality of $Y2$
+
+```{r}
+plotCentrality(CI_obj = centrality_CI, dts = seq(0,2,.01),plot = TRUE, x= 2, type =  "TEC")
+```
+
+Try exploring the different CT centrality metrics. Compare these to, for instance, the DT centrality metrics you would obtain by taking a ``slice`` of this process, that is, for a fixed $\Phi(\Delta t)$
+
+# Ex. 4: Towards multi-level models
+
+Although we focused here on single-subject models, `ctsem` can also be used to fit multi-level models. Luckily, the multi-level model specification is actually very similar to the single-subject model specification.
+
+Let's take the single-subject univariate model we specified in Exercise 1. Recall that after specifying the model we could see which parameters vary across individuals:
+```{r}
+model_ar1$pars
+```
+Now let's assume that we have time series of multiple subjects, which we center around their long-run mean. Let's imagine that we  want to fit a multi-level version of this model, allowing the drift parameter to vary across individuals. To do this, all we need to do is alter the `pars` matrix to allow whatever parameters we would like to vary across individuals. To allow the drift parameter to vary across individuals, we use
+
+```{r}
+model_ar1_ml <- model_ar1
+model_ar1_ml$pars[3,"indvarying"] = TRUE
+model_ar1_ml$pars[3,c(1:4, 7)]
+```
+
+and then proceed just as we did above! Generally speaking, if we don't center each individual around their mean, we also want to let `T0means` vary over individuals, and perhaps even free `CINT` and allow it to vary freely across individuals.
+
+A similar procedure can be followed to fit a multi-level CT-VAR model. In that case to allow all drift parameters to vary across individuals, we set
+
+```{r}
+model_var_ml <- model2
+# find which rows of the pars table belong to the drift matrix parameters
+drift_rows <- (model_var_ml$pars[,"matrix"] == "DRIFT")
+# allow them to vary across individuals
+model_var_ml$pars[drift_rows, "indvarying"] <- TRUE
+# check
+model_var_ml$pars[drift_rows, c(1:4, 7)]
+```
+
+Note, however, that the more complicated the model becomes, the harder it is to fit, and the longer any fitting procedure will take to work. For more details on different model types and model specifications, I recommend consulting the ctsem documentation and vignettes created by Charles Driver (see, e.g., https://www.researchgate.net/publication/310747987_Introduction_to_Hierarchical_Continuous_Time_Dynamic_Modelling_With_ctsem, https://cdriver.netlify.app/ )
+
+An alternative method for estimating multi-level continuous-time models has also been developed by Martin Hecht and colleagues. This method is comptuationally more efficient, but relies currently on observations across individuals being taken at the same time. For details see: (https://www.researchgate.net/publication/339865468_A_Computationally_More_Efficient_Bayesian_Approach_for_Estimating_Continuous-Time_Models)
+
+
+## Bonus Excercise: More single-subject analyses
+
+In this exercise you can put your knowledge to the test by recreating the empirical CT network analysis described by Ryan \& Hamaker (2021) described [here](https://link.springer.com/article/10.1007/s11336-021-09767-0). You can download the data they used from OSF by following [this link](https://osf.io/j4fg8/). Some of the first steps of loading the data are given below
+
+```{r, eval = FALSE}
+# data available for download from https://osf.io/c6xt4/download #
+rawdata <- read.csv("ESMdata.csv",header=TRUE, stringsAsFactors = FALSE)
+data_esm <- rawdata[,c("se_selfdoub","phy_tired","mood_irritat","pat_restl")]
+t1 <- as.POSIXct(paste(rawdata$date,rawdata$resptime_s),format="%d/%m/%y %H:%M:%S")
+```
+
+
+## Contact Details
+
+**o.ryan@uu.nl**
