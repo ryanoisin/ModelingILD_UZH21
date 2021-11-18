@@ -1,0 +1,39 @@
+model{
+   
+
+#####model######
+    for (t in 2:nt) ###model for timepoint 2 onwards
+    {
+        y[t,1:2]~dmnorm(muy[t,1:2],Ipre[1:2,1:2])  ###Ipre is innovation precision
+        muy[t,1]<- mu1 + phi11*z[t-1,1] + phi12*z[t-1,2] ## mu is mean, phi is autoregressive parameters
+        muy[t,2]<- mu2 + phi22*z[t-1,2] + phi21*z[t-1,1] ## mu is mean, phi is autoregressive parameters
+        z[t,1] <- y[t,1]-mu1    
+        z[t,2] <- y[t,2]-mu2
+    }
+
+####timepoint 1#######
+
+    z[1,1] <- y[1,1]-mu1  ###model for time point one variable 1.
+    z[1,2] <- y[1,2]-mu2 ###model for time point one variable 2.
+    
+            
+####priors###########
+       
+    Ipre <- inverse(Ivar) ## innovation precision matrix
+    Ivar[1,1] ~dunif(0,300)   ##innovation variance 1
+    Ivar[2,2] ~dunif(0,300)   ##innovation variance 2
+    Ivar[1,2] <- Icor*sqrt(Ivar[1,1])*sqrt(Ivar[2,2])  ###innovation covariance
+    Ivar[2,1] <- Ivar[1,2] ###innovation covariance
+    Icor~dunif(-1,1) ###innovation correlation
+
+    phi11~dnorm(0,.001) ##autoregression coefficient v1
+    phi12~dnorm(0,.001) ##cross-lagged coefficient effect of v2 on v1
+    phi21~dnorm(0,.001) ##cross-lagged coefficient effect of v1 on v2
+    phi22~dnorm(0,.001) ##autoregression coefficient v2
+    
+    mu1~dnorm(50,.001) ##mean v1
+    mu2~dnorm(3,.001) ##mean v2
+        
+              
+
+}
